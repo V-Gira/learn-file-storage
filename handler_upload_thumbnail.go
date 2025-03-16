@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"mime"
+	"encoding/base64"
+	"crypto/rand"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -63,9 +65,18 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	bytes := make([]byte, 32)
+	_, err = rand.Read(bytes)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error generating random data", err)
+		return
+	}
+
+	fileName := base64.URLEncoding.EncodeToString(bytes)
+
 	fileExtension := contentType[len("image/"):]
 
-	thumbnailPath := filepath.Join(cfg.assetsRoot, fmt.Sprintf("%s.%s", videoID.String(), fileExtension))
+	thumbnailPath := filepath.Join(cfg.assetsRoot, fmt.Sprintf("%s.%s", fileName, fileExtension))
 
 	thumbnail, err := os.Create(thumbnailPath)
 	if err != nil {
@@ -92,7 +103,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	
-	thumbnailURL := fmt.Sprintf("http://localhost:%s/assets/%s.%s", cfg.port, videoID.String(), fileExtension)
+	thumbnailURL := fmt.Sprintf("http://localhost:%s/assets/%s.%s", cfg.port, fileName, fileExtension)
 	videoMetadata.ThumbnailURL = &thumbnailURL
 
 	err = cfg.db.UpdateVideo(videoMetadata)
