@@ -11,6 +11,8 @@ import (
 	"context"
 	"os/exec"
 	"encoding/json"
+	"bytes"
+	"log"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
@@ -96,13 +98,34 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	tempPath := video.Name()
 
-	aspectRatio, err := getVideoAspectRatio(tempPath)
+	processedPath, err := processVideoForFastStart(tempPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error processing video for fast start", err)
+		return
+	}
+	if !checkMoovAtom(processedPath) {
+		respondWithError(w, http.StatusInternalServerError, "Error processing video for fast start", err)
+		return
+	}
+
+	processedVideo, err := os.Open(processedPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error opening processed video", err)
+		return
+	}
+	
+	defer os.Remove(tempPath)
+	defer os.Remove(processedPath)
+	defer processedVideo.Close()
+	
+
+	aspectRatio, err := getVideoAspectRatio(processedPath)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error getting video aspect ratio", err)
 		return
 	}
 
-	_, err = video.Seek(0, io.SeekStart)
+	_, err = processedVideo.Seek(0, io.SeekStart)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error seeking video data", err)
 		return
@@ -122,7 +145,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	_, err = cfg.s3Client.PutObject(context.TODO(), &s3.PutObjectInput{
 		Bucket: &cfg.s3Bucket,
 		Key:    &key,
-		Body:   video,
+		Body:   processedVideo,
 		ContentType: &mediaType,
 	})
 	if err != nil {
@@ -187,4 +210,36 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	}
 
     return aspectRatio, nil
+}
+
+func processVideoForFastStart(filePath string) (string, error) {
+	outputPath := fmt.Sprintf("%s.processing", filePath)
+	// Run the ffmpeg command
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", outputPath)
+	output, err := cmd.CombinedOutput() // Capture both stdout and stderr
+	if err != nil {
+		return "", fmt.Errorf("failed to run ffmpeg: %w\n%s", err, string(output))
+	}
+
+	return outputPath, nil
+}
+
+func checkMoovAtom(filePath string) bool {
+    file, err := os.Open(filePath)
+    if err != nil {
+        log.Printf("Error opening file to check moov: %v", err)
+        return false
+    }
+    defer file.Close()
+    
+    // Read first 200 bytes
+    buffer := make([]byte, 200)
+    _, err = file.Read(buffer)
+    if err != nil {
+        log.Printf("Error reading file: %v", err)
+        return false
+    }
+    
+    // Check if "moov" is in those bytes
+    return bytes.Contains(buffer, []byte("moov"))
 }
