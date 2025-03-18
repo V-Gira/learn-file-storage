@@ -9,6 +9,8 @@ import (
 	"crypto/rand"
 	"fmt"
 	"context"
+	"os/exec"
+	"encoding/json"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/uuid"
@@ -92,6 +94,14 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	tempPath := video.Name()
+
+	aspectRatio, err := getVideoAspectRatio(tempPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error getting video aspect ratio", err)
+		return
+	}
+
 	_, err = video.Seek(0, io.SeekStart)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error seeking video data", err)
@@ -107,7 +117,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	fileName := base64.URLEncoding.EncodeToString(bytes)
 	//key is filename + mp4
-	key := fmt.Sprintf("%s.mp4", fileName)
+	key := fmt.Sprintf("%s/%s.mp4", aspectRatio, fileName)
 
 	_, err = cfg.s3Client.PutObject(context.TODO(), &s3.PutObjectInput{
 		Bucket: &cfg.s3Bucket,
@@ -131,4 +141,50 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	respondWithJSON(w, http.StatusOK, videoMetadata)
+}
+
+type Stream struct {
+    Width  int `json:"width"`
+    Height int `json:"height"`
+}
+
+type FFProbeOutput struct {
+    Streams []Stream `json:"streams"`
+}
+
+func getVideoAspectRatio(filePath string) (string, error) {
+    // Run the ffprobe command
+    cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+	output, err := cmd.CombinedOutput() // Capture both stdout and stderr
+    if err != nil {
+        return "", fmt.Errorf("failed to run ffprobe: %w\n%s", err, string(output))
+    }
+
+    // Parse the JSON output
+    var ffprobeOutput FFProbeOutput
+    err = json.Unmarshal(output, &ffprobeOutput)
+    if err != nil {
+        return "", fmt.Errorf("failed to parse ffprobe output: %w", err)
+    }
+
+    if len(ffprobeOutput.Streams) == 0 {
+        return "", fmt.Errorf("no video streams found in file: %s", filePath)
+    }
+
+    // Calculate the aspect ratio
+    width := ffprobeOutput.Streams[0].Width
+    height := ffprobeOutput.Streams[0].Height
+
+	is16by9 := width/16 == height/9
+	is9by16 := width/9 == height/16
+
+	// asspectRatio is either "16:9" or "9:16" or "other"
+	aspectRatio := "other"
+	if is16by9 {
+		aspectRatio = "landscape"
+	} else if is9by16 {
+		aspectRatio = "portrait"
+	}
+
+    return aspectRatio, nil
 }
